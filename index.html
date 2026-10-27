@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SigScan – Aho-Corasick IDS</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; font-size: 15px; background: #fff; color: #1a1a1a; }
+  header { padding: 12px 20px; border-bottom: 2px solid #1a1a1a; }
+  h1 { margin: 0; font-size: 22px; }
+  header p { margin: 2px 0 0; color: #555; }
+  h2 { font-size: 16px; margin: 0 0 8px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 12px; padding: 10px 20px; background: #f3f4f6; }
+  .stat { background: #fff; border: 1px solid #d1d5db; border-radius: 6px; padding: 6px 16px; }
+  .stat b { display: block; font-size: 22px; }
+  main { display: grid; grid-template-columns: 270px minmax(0, 1fr) 390px; gap: 14px; padding: 14px 20px; }
+  .panel { border: 1px solid #d1d5db; border-radius: 8px; padding: 12px; min-width: 0; }
+  button { font: inherit; padding: 6px 12px; border: 1px solid #1a1a1a; border-radius: 5px; background: #fff; color: #1a1a1a; cursor: pointer; }
+  button:hover { background: #e5e7eb; }
+  button.primary { background: #1a1a1a; color: #fff; }
+  button.primary:hover { background: #374151; }
+  button.stale { background: #b45309; border-color: #b45309; }
+  input, textarea { font: inherit; width: 100%; padding: 5px 7px; border: 1px solid #9ca3af; border-radius: 4px; }
+  textarea { font-family: Consolas, monospace; resize: vertical; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
+  .cat h3 { margin: 10px 0 4px; font-size: 12px; text-transform: uppercase; color: #555; }
+  .sig { display: flex; justify-content: space-between; align-items: center; padding: 2px 4px 2px 8px; margin-bottom: 3px;
+         background: #f9fafb; border-radius: 4px; font-family: Consolas, monospace; }
+  .sig button { border: none; background: none; color: #b91c1c; font-size: 18px; padding: 0 6px; line-height: 1; }
+  .hint { font-size: 13px; color: #555; margin: 6px 0; }
+  #tree-box { overflow: auto; max-height: 72vh; border: 1px solid #e5e7eb; border-radius: 6px; }
+  #tree { display: block; }
+  .edge { stroke: #6b7280; stroke-width: 1.5; }
+  .edge-label { font: bold 13px Consolas, monospace; fill: #1d4ed8; text-anchor: middle; }
+  .fail { fill: none; stroke: #9333ea; stroke-width: 1.3; stroke-dasharray: 5 4; }
+  .node circle { fill: #fff; stroke: #1a1a1a; stroke-width: 1.5; }
+  .node text { font-size: 11px; text-anchor: middle; dominant-baseline: central; }
+  .node.current circle { fill: #facc15; stroke-width: 3; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: #555; margin: 6px 0; align-items: center; }
+  #view { margin-top: 8px; padding: 8px; min-height: 44px; background: #f9fafb; border: 1px solid #d1d5db; border-radius: 4px;
+          font-family: Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #view .hit { background: #dc2626; color: #fff; }
+  #view .cur { background: #fde047; color: #000; outline: 2px solid #ca8a04; }
+  #view .done { color: #9ca3af; }
+  #view .hit.done { color: #fff; }
+  #step-info { min-height: 22px; font-size: 14px; margin: 6px 0; }
+  #step-info .goto { color: #15803d; font-weight: bold; }
+  #step-info .failure { color: #9333ea; font-weight: bold; }
+  .verdict { margin: 10px 0; padding: 14px; border-radius: 8px; text-align: center; font-size: 22px; font-weight: bold; }
+  .verdict.alert { background: #dc2626; color: #fff; }
+  .verdict.clean { background: #16a34a; color: #fff; }
+  .verdict.idle { background: #f3f4f6; color: #555; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #e5e7eb; }
+  td.mono { font-family: Consolas, monospace; color: #b91c1c; }
+  #log-box { margin: 0 20px 20px; }
+  #log { max-height: 170px; overflow-y: auto; font-family: Consolas, monospace; font-size: 13px; background: #f9fafb; padding: 8px; border-radius: 4px; }
+  #log div { padding: 1px 0; }
+  @media (max-width: 1150px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>SigScan: Signature-Based Intrusion Detection</h1>
+  <p>Aho-Corasick multi-pattern matching, as used in Snort IDS</p>
+</header>
+
+<div class="stats">
+  <div class="stat">Signatures<b id="st-sigs">0</b></div>
+  <div class="stat">States<b id="st-states">0</b></div>
+  <div class="stat">Characters scanned<b id="st-chars">0</b></div>
+  <div class="stat">Matches found<b id="st-matches">0</b></div>
+</div>
+
+<main>
+  <section class="panel">
+    <h2>Attack signatures</h2>
+    <div id="sig-list"></div>
+    <h3 style="font-size:13px;margin:14px 0 4px">Add signature</h3>
+    <input id="new-sig" placeholder="signature, e.g. exec(">
+    <input id="new-cat" list="cats" placeholder="category" style="margin-top:6px">
+    <datalist id="cats"></datalist>
+    <div class="row"><button onclick="addSignature()">Add</button></div>
+    <div class="row"><button id="build-btn" class="primary" onclick="buildAutomaton()">Build automaton</button></div>
+    <p class="hint" id="stale-hint"></p>
+  </section>
+
+  <section class="panel">
+    <h2>Automaton (trie + failure links)</h2>
+    <div class="legend">
+      <label><input type="checkbox" id="show-fail" checked onchange="drawTree()" style="width:auto"> Failure links</label>
+      <span>— trie edge (goto)</span>
+      <span style="color:#9333ea">- - → failure link</span>
+      <span>◎ output state</span>
+      <span>Unlinked states fail to root 0</span>
+    </div>
+    <div id="tree-box"><svg id="tree" xmlns="http://www.w3.org/2000/svg"></svg></div>
+  </section>
+
+  <section class="panel">
+    <h2>Packet payload</h2>
+    <div class="row" id="samples"></div>
+    <textarea id="payload" rows="3"></textarea>
+    <div class="row">
+      <button class="primary" onclick="scanAll()">Scan</button>
+      <button onclick="step()">Step</button>
+    </div>
+    <div id="step-info"></div>
+    <div id="view"></div>
+    <div id="verdict" class="verdict idle">Load a packet and press Scan</div>
+    <table>
+      <thead><tr><th>Signature</th><th>Category</th><th>Position</th></tr></thead>
+      <tbody id="matches"></tbody>
+    </table>
+  </section>
+</main>
+
+<section id="log-box" class="panel">
+  <h2>Event log</h2>
+  <div id="log"></div>
+</section>
+
+<script>
+// ---------- Aho-Corasick (same algorithm as sigscan.py) ----------
+// Map is used instead of a plain object so edges keep insertion order
+// (plain objects reorder digit keys like "1"), giving the same state numbers as Python.
+class AhoCorasick {
+  constructor() {
+    this.goto = [new Map()]; // goto[s]: char -> next state (trie edges)
+    this.fail = [0];         // fail[s]: failure link
+    this.out = [[]];         // out[s]: signatures ending at state s
+  }
+
+  // Build step 1: insert the pattern into the trie.
+  add(pattern) {
+    pattern = pattern.toLowerCase();
+    let state = 0;
+    for (const ch of pattern) {
+      if (!this.goto[state].has(ch)) {
+        this.goto.push(new Map()); this.fail.push(0); this.out.push([]);
+        this.goto[state].set(ch, this.goto.length - 1);
+      }
+      state = this.goto[state].get(ch);
+    }
+    if (!this.out[state].includes(pattern)) this.out[state].push(pattern);
+  }
+
+  // Build steps 2 and 3: failure links by BFS, then merge output sets.
+  build() {
+    const queue = [];
+    for (const child of this.goto[0].values()) { this.fail[child] = 0; queue.push(child); }
+    while (queue.length) {
+      const state = queue.shift();
+      for (const [ch, child] of this.goto[state]) {
+        queue.push(child);
+        // Follow the parent's failure links until a state has an edge on ch.
+        let f = this.fail[state];
+        while (f !== 0 && !this.goto[f].has(ch)) f = this.fail[f];
+        this.fail[child] = this.goto[f].has(ch) ? this.goto[f].get(ch) : 0;
+        // Signatures ending at the failure state also end here.
+        this.out[child] = this.out[child].concat(this.out[this.fail[child]]);
+      }
+    }
+  }
+
+  // One search transition. If trace is given, records each goto / failure move.
+  next(state, ch, trace) {
+    while (state !== 0 && !this.goto[state].has(ch)) {
+      if (trace) trace.push({ type: 'failure', from: state, to: this.fail[state] });
+      state = this.fail[state];
+    }
+    if (this.goto[state].has(ch)) {
+      const to = this.goto[state].get(ch);
+      if (trace) trace.push({ type: 'goto', from: state, to });
+      return to;
+    }
+    if (trace) trace.push({ type: 'stay', from: 0, to: 0 });
+    return 0;
+  }
+
+  // Search phase: one pass, returns every [position, pattern].
+  search(text) {
+    const matches = [];
+    let state = 0;
+    for (let i = 0; i < text.length; i++) {
+      state = this.next(state, text[i].toLowerCase());
+      for (const p of this.out[state]) matches.push([i - p.length + 1, p]);
+    }
+    return matches;
+  }
+}
+
+// ---------- Data (same defaults as sigscan.py) ----------
+const DEFAULT_SIGNATURES = [
+  ["' or 1=1", 'SQL Injection'], ['union select', 'SQL Injection'], ['drop table', 'SQL Injection'],
+  ['<script>', 'Cross-Site Scripting (XSS)'], ['javascript:', 'Cross-Site Scripting (XSS)'], ['onerror=', 'Cross-Site Scripting (XSS)'],
+  ['../', 'Path Traversal'], ['/etc/passwd', 'Path Traversal'],
+  ['; rm -rf', 'Command Injection'], ['cmd.exe', 'Command Injection'], ['/bin/sh', 'Command Injection'],
+];
+const SAMPLES = {
+  'SQL injection': "GET /login?user=admin' OR 1=1 --&pass=x HTTP/1.1",
+  'XSS': 'POST /comment text=<SCRIPT>alert(document.cookie)<\/script>', // "<\/" keeps the HTML parser from ending this <script> block
+  'Path traversal': 'GET /download?file=../../etc/passwd HTTP/1.1',
+  'Clean HTTP': 'GET /index.html HTTP/1.1 Host: example.com',
+  'Clean JSON': '{"user": "alice", "action": "login", "remember": true}',
+};
+
+let signatures = DEFAULT_SIGNATURES.map(([sig, cat]) => ({ sig, cat }));
+let ac = null;           // the built automaton
+let categoryOf = new Map();
+let run = null;          // stepping session: { i, state, matches }
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const show = ch => ch === ' ' ? '␣' : ch;
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString([], { hour12: false });
+  $('log').insertAdjacentHTML('afterbegin', `<div>[${t}] ${esc(msg)}</div>`);
+}
+
+// ---------- Signature list ----------
+function renderSignatures() {
+  const cats = [...new Set(signatures.map(s => s.cat))];
+  $('sig-list').innerHTML = cats.map(cat => `<div class="cat"><h3>${esc(cat)}</h3>` +
+    signatures.map((s, idx) => s.cat !== cat ? '' :
+      `<div class="sig"><span>${esc(s.sig)}</span><button title="Remove" onclick="removeSignature(${idx})">×</button></div>`).join('') +
+    '</div>').join('');
+  $('cats').innerHTML = cats.map(c => `<option value="${esc(c)}">`).join('');
+}
+
+function markStale(msg) {
+  log(msg);
+  $('build-btn').classList.add('stale');
+  $('stale-hint').textContent = 'Signatures changed: rebuild the automaton.';
+}
+
+function addSignature() {
+  const sig = $('new-sig').value.toLowerCase(), cat = $('new-cat').value.trim() || 'Custom';
+  if (!sig.trim()) return log('Cannot add an empty signature');
+  if (signatures.some(s => s.sig.toLowerCase() === sig)) return log(`Signature "${sig}" already exists`);
+  signatures.push({ sig, cat });
+  $('new-sig').value = '';
+  renderSignatures();
+  markStale(`Added signature "${sig}" (${cat})`);
+}
+
+function removeSignature(idx) {
+  const [removed] = signatures.splice(idx, 1);
+  renderSignatures();
+  markStale(`Removed signature "${removed.sig}"`);
+}
+
+// ---------- Build + draw ----------
+function buildAutomaton() {
+  ac = new AhoCorasick();
+  categoryOf = new Map();
+  for (const { sig, cat } of signatures) { ac.add(sig); categoryOf.set(sig.toLowerCase(), cat); }
+  ac.build();
+  run = null;
+  $('build-btn').classList.remove('stale');
+  $('stale-hint').textContent = '';
+  drawTree();
+  showResult($('payload').value, [], 0, -1, null);
+  log(`Automaton built: ${categoryOf.size} signatures, ${ac.goto.length} states`);
+}
+
+// Tree layout: depth -> column, leaves get consecutive rows, a parent sits
+// midway between its first and last child.
+function layout() {
+  const pos = [], label = [''];
+  let row = 0;
+  (function place(s, depth) {
+    const kids = [...ac.goto[s]];
+    for (const [ch, k] of kids) { label[k] = label[s] + ch; place(k, depth + 1); }
+    const y = kids.length ? (pos[kids[0][1]].y + pos[kids[kids.length - 1][1]].y) / 2 : row++;
+    pos[s] = { x: depth, y };
+  })(0, 0);
+  return { pos, label, rows: Math.max(row, 1) };
+}
+
+function drawTree() {
+  if (!ac) return;
+  const COL = 54, ROW = 40, PAD = 28, R = 13;
+  const { pos, label, rows } = layout();
+  const X = s => PAD + pos[s].x * COL, Y = s => PAD + pos[s].y * ROW;
+  const width = PAD * 2 + Math.max(...pos.map(p => p.x)) * COL, height = PAD * 2 + (rows - 1) * ROW;
+  let svg = `<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+    <path d="M0,0 L10,5 L0,10 z" fill="#9333ea"/></marker></defs>`;
+  // Trie edges, labelled with their character (label placed near the child state).
+  ac.goto.forEach((edges, s) => edges.forEach((k, ch) => {
+    svg += `<line class="edge" x1="${X(s)}" y1="${Y(s)}" x2="${X(k)}" y2="${Y(k)}"/>` +
+      `<text class="edge-label" x="${X(s) * 0.4 + X(k) * 0.6}" y="${Y(s) * 0.4 + Y(k) * 0.6 - 5}">${esc(show(ch))}</text>`;
+  }));
+  // Failure links (to non-root states) as dashed curved arrows.
+  if ($('show-fail').checked) ac.fail.forEach((f, s) => {
+    if (s === 0 || f === 0) return;
+    const x1 = X(s), y1 = Y(s), x2 = X(f), y2 = Y(f);
+    const len = Math.hypot(x2 - x1, y2 - y1) || 1, bend = Math.min(60, len * 0.25);
+    const cx = (x1 + x2) / 2 - (y2 - y1) / len * bend, cy = (y1 + y2) / 2 + (x2 - x1) / len * bend;
+    const edge = (x, y) => { const d = Math.hypot(cx - x, cy - y) || 1; return [x + (cx - x) / d * (R + 3), y + (cy - y) / d * (R + 3)]; };
+    const [sx, sy] = edge(x1, y1), [ex, ey] = edge(x2, y2);
+    svg += `<path class="fail" d="M${sx},${sy} Q${cx},${cy} ${ex},${ey}" marker-end="url(#arrow)"/>`;
+  });
+  // States: double circle when the state outputs a signature.
+  ac.goto.forEach((_, s) => {
+    const tip = `State ${s} "${label[s]}"\nfailure → ${ac.fail[s]} "${label[ac.fail[s]]}"` +
+      (ac.out[s].length ? `\noutput: ${ac.out[s].join(', ')}` : '');
+    svg += `<g class="node" id="n${s}"><title>${esc(tip)}</title><circle cx="${X(s)}" cy="${Y(s)}" r="${R}"/>` +
+      (ac.out[s].length ? `<circle cx="${X(s)}" cy="${Y(s)}" r="${R - 4}"/>` : '') +
+      `<text x="${X(s)}" y="${Y(s)}">${s}</text></g>`;
+  });
+  const tree = $('tree');
+  tree.setAttribute('width', width); tree.setAttribute('height', height);
+  tree.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  tree.innerHTML = svg;
+  if (run) highlightState(run.state);
+}
+
+function highlightState(s) {
+  document.querySelectorAll('.node.current').forEach(n => n.classList.remove('current'));
+  const node = $('n' + s);
+  if (node) { node.classList.add('current'); node.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
+}
+
+// ---------- Scanning ----------
+// done: true = finished, false = stepping in progress, null = nothing scanned yet.
+function showResult(text, matches, scanned, cur, done) {
+  const hit = new Array(text.length).fill(false);
+  for (const [p, sig] of matches) for (let j = p; j < p + sig.length; j++) hit[j] = true;
+  $('view').innerHTML = [...text].map((ch, i) => {
+    const cls = [hit[i] && 'hit', i === cur && 'cur', done === false && i < cur && 'done'].filter(Boolean).join(' ');
+    return cls ? `<span class="${cls}">${esc(ch)}</span>` : esc(ch);
+  }).join('');
+  $('matches').innerHTML = matches.map(([p, sig]) =>
+    `<tr><td class="mono">${esc(sig)}</td><td>${esc(categoryOf.get(sig))}</td><td>${p}</td></tr>`).join('');
+  const v = $('verdict');
+  if (done === true && matches.length) {
+    v.className = 'verdict alert';
+    v.textContent = `ALERT: ${[...new Set(matches.map(m => categoryOf.get(m[1])))].join(', ')} detected`;
+  } else if (done === true) {
+    v.className = 'verdict clean'; v.textContent = 'CLEAN PACKET';
+  } else {
+    v.className = 'verdict idle';
+    v.textContent = done === false ? `Scanning… ${scanned} / ${text.length}` : 'Load a packet and press Scan';
+  }
+  $('st-sigs').textContent = categoryOf.size;
+  $('st-states').textContent = ac.goto.length;
+  $('st-chars').textContent = scanned;
+  $('st-matches').textContent = matches.length;
+}
+
+function logVerdict(matches) {
+  if (!matches.length) return log('Verdict: CLEAN PACKET');
+  log(`Verdict: ALERT (${matches.map(([p, s]) => `"${s}" @${p}`).join(', ')})`);
+}
+
+function scanAll() {
+  const text = $('payload').value;
+  const matches = ac.search(text);
+  run = null;
+  highlightState(-1);
+  $('step-info').textContent = `Scanned ${text.length} characters in a single pass.`;
+  showResult(text, matches, text.length, -1, true);
+  log(`Scan: ${text.length} chars, ${matches.length} match(es)`);
+  logVerdict(matches);
+}
+
+// Step: process exactly one payload character, showing every transition taken.
+function step() {
+  const text = $('payload').value;
+  if (!text.length) return log('Payload is empty');
+  if (!run) { run = { i: 0, state: 0, matches: [] }; log('Step mode started at state 0'); }
+  const i = run.i, ch = text[i].toLowerCase(), trace = [];
+  run.state = ac.next(run.state, ch, trace);
+  const found = ac.out[run.state].map(p => [i - p.length + 1, p]);
+  run.matches.push(...found);
+  run.i++;
+  const moves = trace.map(t => t.type === 'stay' ? 'no edge, stay at root 0' :
+    `<span class="${t.type}">${t.type}</span> ${t.from} → ${t.to}`).join(', ');
+  $('step-info').innerHTML = `Char '${esc(show(text[i]))}' (index ${i}): ${moves}` +
+    (found.length ? ` — <b style="color:#dc2626">match: ${found.map(f => esc(f[1])).join(', ')}</b>` : '');
+  log(`'${show(text[i])}' @${i}: ${trace.map(t => t.type === 'stay' ? 'stay 0' : `${t.type} ${t.from}→${t.to}`).join(', ')}` +
+    (found.length ? ` | MATCH ${found.map(f => `"${f[1]}"`).join(', ')}` : ''));
+  highlightState(run.state);
+  const done = run.i >= text.length;
+  showResult(text, run.matches, run.i, done ? -1 : i, done ? true : false);
+  if (done) { logVerdict(run.matches); run = null; }
+}
+
+// ---------- Startup ----------
+for (const name of Object.keys(SAMPLES)) {
+  const b = document.createElement('button');
+  b.textContent = name;
+  b.onclick = () => { $('payload').value = SAMPLES[name]; run = null; $('step-info').textContent = '';
+    showResult(SAMPLES[name], [], 0, -1, null); highlightState(-1); log(`Loaded sample packet: ${name}`); };
+  $('samples').appendChild(b);
+}
+$('payload').addEventListener('input', () => { run = null; });
+$('new-sig').addEventListener('keydown', e => { if (e.key === 'Enter') addSignature(); });
+$('payload').value = SAMPLES['SQL injection'];
+renderSignatures();
+buildAutomaton();
+</script>
+</body>
+</html>
